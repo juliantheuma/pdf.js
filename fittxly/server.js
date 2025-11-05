@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -13,8 +14,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
+// Enable CORS for all origins
+app.use(cors());
+
 // PDF to PNG conversion function
-async function convertPdfToImages(pdfPath) {
+async function convertPdfToImages(pdfPath, progressCallback) {
   console.log(`🔄 Starting conversion of: ${pdfPath}`);
   
   const data = new Uint8Array(fs.readFileSync(pdfPath));
@@ -46,6 +50,15 @@ async function convertPdfToImages(pdfPath) {
     // Loop through all pages
     for (let pageNum = 1; pageNum <= numPages; pageNum++) {
       console.log(`  Processing page ${pageNum}/${numPages}...`);
+      
+      if (progressCallback) {
+        progressCallback({
+          stage: 'converting',
+          current: pageNum,
+          total: numPages,
+          message: `Converting page ${pageNum} of ${numPages} to image`
+        });
+      }
       
       const page = await pdfDocument.getPage(pageNum);
       const viewport = page.getViewport({ scale: 1.5 });
@@ -116,11 +129,11 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
+    fileSize: 2000 * 1024 * 1024 // 50MB limit
   }
 });
 
-async function convertToText(imagesFolder) {
+async function convertToText(imagesFolder, progressCallback) {
     console.log(`🔄 Starting conversion of: ${imagesFolder}`);
   
     const worker = await createWorker('eng');
@@ -134,16 +147,44 @@ async function convertToText(imagesFolder) {
         return numA - numB;
       });
   
+    const totalFiles = files.length;
+    let currentFile = 0;
+  
     for (const image of files) {
+      currentFile++;
       const imagePath = path.join(imagesFolder, image);
       console.log('🔍 Processing image:', imagePath);
-  
+
+      if (progressCallback) {
+        progressCallback({
+          stage: 'ocr',
+          current: currentFile,
+          total: totalFiles,
+          message: `Processing OCR on page ${currentFile} of ${totalFiles}`
+        });
+      }
+
       const { data: { text } } = await worker.recognize(imagePath);
       const _isSection = checkForNewSection(text);
-      if (_isSection) sections.push({
-        text: text,
-        documentType: detectDocumentType(text)
-      });
+      if (_isSection) {
+        // Extract page number from filename (e.g., "page-1.png" -> 1)
+        const pageNumber = parseInt(image.match(/\d+/)[0], 10);
+        const section = {
+          page: pageNumber,
+          text: text,
+          documentType: detectDocumentType(text)
+        };
+        sections.push(section);
+        
+        // Emit section found event
+        if (progressCallback) {
+          progressCallback({
+            type: 'section_found',
+            section: section,
+            message: `Found section on page ${pageNumber}`
+          });
+        }
+      }
     }
   
     await worker.terminate();
@@ -161,14 +202,14 @@ async function convertToText(imagesFolder) {
     const companyNumberPattern = /C-\d+/i;
     if (companyNumberPattern.test(text)) {
       console.log("companyNumberPattern.test(text)")
-      return 'companies';
+      return 'COMPANY';
     }
     
     // Check for "Comp. Reg. No." or "Company Reg. No." pattern
     const compRegPattern = /comp\.?\s*reg\.?\s*no\.?/i;
     if (compRegPattern.test(text)) {
       console.log("compRegPattern.test(text)")
-      return 'companies';
+      return 'COMPANY';
     }
     
     // Secondary company indicators (fallback)
@@ -179,7 +220,7 @@ async function convertToText(imagesFolder) {
 
     if(companyIndicators.some(indicator => lowerText.includes(indicator))){
       console.log("companyIndicators.some(indicator => lowerText.includes(indicator))")
-      return 'companies';
+      return 'COMPANY';
     }
     
     // Individual indicators
@@ -204,10 +245,10 @@ async function convertToText(imagesFolder) {
     
     // Return the category with the highest score, or default to company if no clear match
     const maxScore = Math.max(companyScore, individualScore);
-    if (maxScore === 0) return 'companies'; // Default to company
+    if (maxScore === 0) return 'COMPANY'; // Default to company
     
-    if (individualScore > companyScore) return 'individuals';
-    return 'companies'; // Default to company if scores are equal or company is higher
+    if (individualScore > companyScore) return 'INDIVIDUAL';
+    return 'COMPANY'; // Default to company if scores are equal or company is higher
   };
   
 
@@ -240,7 +281,136 @@ function checkForNewSection(text) {
     const isSection = foundCount >= 3;
     return isSection;
   };
-// Upload endpoint
+
+// Combined PDF processing function - converts and OCRs page by page
+async function processPdfPages(pdfPath, progressCallback) {
+  console.log(`🔄 Starting processing of: ${pdfPath}`);
+  
+  const data = new Uint8Array(fs.readFileSync(pdfPath));
+  
+  const loadingTask = getDocument({
+    data,
+    cMapUrl: "../build/dist/cmaps/",
+    cMapPacked: true,
+    standardFontDataUrl: "../build/dist/standard_fonts/",
+  });
+
+  try {
+    const pdfDocument = await loadingTask.promise;
+    const numPages = pdfDocument.numPages;
+    console.log(`📄 PDF has ${numPages} pages`);
+    
+    const canvasFactory = pdfDocument.canvasFactory;
+    const sections = [];
+    
+    // Create images folder based on PDF filename
+    const pdfBasename = path.basename(pdfPath, '.pdf');
+    const imagesFolder = path.join(__dirname, 'uploads', `${pdfBasename}_images`);
+    
+    // Create the folder if it doesn't exist
+    if (!fs.existsSync(imagesFolder)) {
+      fs.mkdirSync(imagesFolder, { recursive: true });
+    }
+    
+    // Initialize Tesseract worker once for all pages
+    const worker = await createWorker('eng');
+    
+    // Process each page: convert → OCR → check for sections
+    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+      console.log(`\n📍 Processing page ${pageNum}/${numPages}...`);
+      
+      // STEP 1: Convert PDF page to image
+      // if (progressCallback) {
+      //   progressCallback({
+      //     type: 'progress',
+      //     stage: 'converting',
+      //     current: pageNum,
+      //     total: numPages,
+      //     message: `Converting page ${pageNum} of ${numPages} to image`,
+      //     progress: Math.round((pageNum / numPages) * 40) // 0-40% for conversion
+      //   });
+      // }
+      
+      const page = await pdfDocument.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvasAndContext = canvasFactory.create(
+        viewport.width,
+        viewport.height
+      );
+      const renderContext = {
+        canvasContext: canvasAndContext.context,
+        viewport,
+      };
+
+      const renderTask = page.render(renderContext);
+      await renderTask.promise;
+      
+      const image = canvasAndContext.canvas.toBuffer("image/png");
+      const outputPath = path.join(imagesFolder, `page-${pageNum}.png`);
+      
+      await fs.promises.writeFile(outputPath, image);
+      page.cleanup();
+      
+      console.log(`  ✅ Image saved: page-${pageNum}.png`);
+      
+      // STEP 2: Run OCR immediately on this page
+      if (progressCallback) {
+        progressCallback({
+          type: 'progress',
+          stage: 'ocr',
+          current: pageNum,
+          total: numPages,
+          message: `Processing OCR on page ${pageNum} of ${numPages}`,
+          progress: Math.round((pageNum / numPages) * 100) // 40-100% for OCR
+        });
+      }
+      
+      const { data: { text } } = await worker.recognize(outputPath);
+      console.log(`  🔍 OCR complete for page ${pageNum}`);
+      
+      // STEP 3: Check if this is a section and emit event immediately
+      const _isSection = checkForNewSection(text);
+      if (_isSection) {
+        const section = {
+          page: pageNum,
+          text: text,
+          documentType: detectDocumentType(text)
+        };
+        sections.push(section);
+        
+        console.log(`  ⭐ Section found on page ${pageNum}!`);
+        
+        // Emit section found event immediately
+        if (progressCallback) {
+          progressCallback({
+            type: 'section_found',
+            section: section,
+            message: `Found section on page ${pageNum}`
+          });
+        }
+      }
+    }
+    
+    // Cleanup
+    await worker.terminate();
+    
+    console.log(`✅ Processing complete! Found ${sections.length} sections`);
+    
+    return {
+      success: true,
+      numPages,
+      imagesFolder,
+      sections
+    };
+  } catch (error) {
+    console.error("❌ Processing error:", error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+// Upload endpoint with Server-Sent Events for progress
 app.post('/upload', upload.single('pdf'), async (req, res) => {
   if (!req.file) {
     console.log('❌ No file uploaded');
@@ -257,43 +427,61 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
   console.log('📍 Saved to:', req.file.path);
   console.log('---');
 
-  // Convert PDF to images
-  const conversionResult = await convertPdfToImages(req.file.path);
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
 
-  if (conversionResult.success) {
+  // Helper function to send SSE messages
+  const sendProgress = (data) => {
 
-    const sections = await convertToText(conversionResult.imagesFolder);
-    console.log('🔍 Sections:', sections);
+    console.log("Sending progress!");
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
 
-    res.json({
+  try {
+    // Send initial progress
+    sendProgress({ 
+      type: 'progress',
+      stage: 'uploading', 
+      message: 'File uploaded successfully, starting processing...',
+      progress: 0
+    });
+
+    // Process PDF with combined page-by-page approach
+    const result = await processPdfPages(req.file.path, (progressData) => {
+      // Forward all progress events to client
+      sendProgress(progressData);
+    });
+
+    if (!result.success) {
+      sendProgress({
+        type: 'error',
+        error: result.error,
+        message: 'PDF processing failed'
+      });
+      return res.end();
+    }
+
+    console.log('🔍 Total sections found:', result.sections.length);
+
+    // Send final result
+    sendProgress({
+      type: 'complete',
       success: true,
-      sections: sections
-    //   message: 'PDF uploaded and converted successfully',
-    //   file: {
-    //     originalName: req.file.originalname,
-    //     savedAs: req.file.filename,
-    //     size: req.file.size,
-    //     sizeKB: parseFloat((req.file.size / 1024).toFixed(2)),
-    //     path: req.file.path
-    //   },
-    //   conversion: {
-    //     numPages: conversionResult.numPages,
-    //     imagesFolder: conversionResult.imagesFolder,
-    //     images: conversionResult.images
-    //   }
+      sections: result.sections,
+      progress: 100
     });
-  } else {
-    res.status(500).json({
-      success: false,
-      message: 'PDF uploaded but conversion failed',
-      error: conversionResult.error,
-      file: {
-        originalName: req.file.originalname,
-        savedAs: req.file.filename,
-        size: req.file.size,
-        path: req.file.path
-      }
+
+    res.end();
+  } catch (error) {
+    console.error('❌ Processing error:', error);
+    sendProgress({
+      type: 'error',
+      error: error.message,
+      message: 'Processing failed'
     });
+    res.end();
   }
 });
 
