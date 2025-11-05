@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+*.md
+.DS_Store
+.env
+.vscode
+.idea
+*.log
+fittxly/node_modules
+fittxly/uploads/*
+!fittxly/uploads/.gitkeep
+

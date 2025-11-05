@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  pdf-server:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount uploads directory to persist files
+      - ./fittxly/uploads:/app/fittxly/uploads
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+
