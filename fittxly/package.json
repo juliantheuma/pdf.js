@@ -8,11 +8,16 @@
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["pdf", "express", "multer"],
+  "keywords": [
+    "pdf",
+    "express",
+    "multer"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "express": "^5.1.0",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "tesseract.js": "^6.0.1"
   }
 }

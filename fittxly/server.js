@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { getDocument } from "../build/dist/legacy/build/pdf.mjs";
+import { createWorker } from 'tesseract.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -118,73 +120,126 @@ const upload = multer({
   }
 });
 
-// Serve a simple HTML form for testing
-app.get('/', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>PDF Upload</title>
-      <style>
-        body {
-          font-family: Arial, sans-serif;
-          max-width: 600px;
-          margin: 50px auto;
-          padding: 20px;
-        }
-        .upload-form {
-          border: 2px dashed #ccc;
-          padding: 30px;
-          border-radius: 10px;
-          text-align: center;
-        }
-        input[type="file"] {
-          margin: 20px 0;
-        }
-        button {
-          background: #007bff;
-          color: white;
-          padding: 10px 30px;
-          border: none;
-          border-radius: 5px;
-          cursor: pointer;
-          font-size: 16px;
-        }
-        button:hover {
-          background: #0056b3;
-        }
-        .message {
-          margin-top: 20px;
-          padding: 15px;
-          border-radius: 5px;
-        }
-        .success {
-          background: #d4edda;
-          color: #155724;
-        }
-        .error {
-          background: #f8d7da;
-          color: #721c24;
-        }
-      </style>
-    </head>
-    <body>
-      <h1>📄 PDF Upload & Convert Server</h1>
-      <div class="upload-form">
-        <h2>Upload a PDF File</h2>
-        <p style="color: #666; font-size: 14px;">Your PDF will be automatically converted to PNG images</p>
-        <form action="/upload" method="POST" enctype="multipart/form-data">
-          <input type="file" name="pdf" accept=".pdf" required>
-          <br>
-          <button type="submit">Upload & Convert PDF</button>
-        </form>
-        <div id="message"></div>
-      </div>
-    </body>
-    </html>
-  `);
-});
+async function convertToText(imagesFolder) {
+    console.log(`🔄 Starting conversion of: ${imagesFolder}`);
+  
+    const worker = await createWorker('eng');
+    const sections = [];
+  
+    const files = fs.readdirSync(imagesFolder)
+      .filter(f => f.endsWith('.png'))
+      .sort((a, b) => {
+        const numA = parseInt(a.match(/\d+/)[0], 10);
+        const numB = parseInt(b.match(/\d+/)[0], 10);
+        return numA - numB;
+      });
+  
+    for (const image of files) {
+      const imagePath = path.join(imagesFolder, image);
+      console.log('🔍 Processing image:', imagePath);
+  
+      const { data: { text } } = await worker.recognize(imagePath);
+      const _isSection = checkForNewSection(text);
+      if (_isSection) sections.push({
+        text: text,
+        documentType: detectDocumentType(text)
+      });
+    }
+  
+    await worker.terminate();
+    return sections;
+  }
 
+  // Function to detect document type based on OCR text
+  const detectDocumentType = (text) => {
+
+    console.log("text: ", text)
+    const lowerText = text.toLowerCase();
+    
+    // Primary company detection - check for specific patterns first
+    // Check for company number pattern like 'C-9279472' (C- followed by any amount of numbers)
+    const companyNumberPattern = /C-\d+/i;
+    if (companyNumberPattern.test(text)) {
+      console.log("companyNumberPattern.test(text)")
+      return 'companies';
+    }
+    
+    // Check for "Comp. Reg. No." or "Company Reg. No." pattern
+    const compRegPattern = /comp\.?\s*reg\.?\s*no\.?/i;
+    if (compRegPattern.test(text)) {
+      console.log("compRegPattern.test(text)")
+      return 'companies';
+    }
+    
+    // Secondary company indicators (fallback)
+    const companyIndicators = ['CHICKENNNCNECNEJCNENC'
+      // 'company', 'ltd', 'limited', 'inc', 'corp', 'corporation', 'plc', 'llc',
+      // 'company number', 'registration number', 'reg no', 'company reg'
+    ];
+
+    if(companyIndicators.some(indicator => lowerText.includes(indicator))){
+      console.log("companyIndicators.some(indicator => lowerText.includes(indicator))")
+      return 'companies';
+    }
+    
+    // Individual indicators
+    const individualIndicators = [
+      'name', 'spouse',
+      'date of birth', 'birthplace',
+      'father', 'mother',
+      'id card', 'passport',
+    ];
+    
+    // Count matches for each category
+    const companyScore = companyIndicators.reduce((score, indicator) => {
+      return score + (lowerText.includes(indicator) ? 1 : 0);
+    }, 0);
+    
+    const individualScore = individualIndicators.reduce((score, indicator) => {
+      return score + (lowerText.includes(indicator) ? 1 : 0);
+    }, 0);
+
+    console.log("companyScore: ", companyScore)
+    console.log("individualScore: ", individualScore)
+    
+    // Return the category with the highest score, or default to company if no clear match
+    const maxScore = Math.max(companyScore, individualScore);
+    if (maxScore === 0) return 'companies'; // Default to company
+    
+    if (individualScore > companyScore) return 'individuals';
+    return 'companies'; // Default to company if scores are equal or company is higher
+  };
+  
+
+function checkForNewSection(text) {
+    const keywords = [
+      'Searches Unit',
+      'Group Reference',
+      'IDENTITY',
+      'Archbishop Street',
+      'Search Results',
+      'Searches of',
+      'Liabilities From',
+      'Transfers From',
+    ];
+
+    const lowerText = text.toLowerCase();
+    let foundCount = 0;
+    const foundKeywords = [];
+
+    keywords.forEach(keyword => {
+      if (lowerText.includes(keyword.toLowerCase())) {
+        foundCount++;
+        foundKeywords.push(keyword);
+      }
+    });
+
+    if( !lowerText.includes('liabilities') && !lowerText.includes('transfers')){ return false; }
+    if (lowerText.includes('invoice')){ return false; }
+
+    const isSection = foundCount >= 3;
+    return isSection;
+  };
 // Upload endpoint
 app.post('/upload', upload.single('pdf'), async (req, res) => {
   if (!req.file) {
@@ -206,21 +261,26 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
   const conversionResult = await convertPdfToImages(req.file.path);
 
   if (conversionResult.success) {
+
+    const sections = await convertToText(conversionResult.imagesFolder);
+    console.log('🔍 Sections:', sections);
+
     res.json({
       success: true,
-      message: 'PDF uploaded and converted successfully',
-      file: {
-        originalName: req.file.originalname,
-        savedAs: req.file.filename,
-        size: req.file.size,
-        sizeKB: parseFloat((req.file.size / 1024).toFixed(2)),
-        path: req.file.path
-      },
-      conversion: {
-        numPages: conversionResult.numPages,
-        imagesFolder: conversionResult.imagesFolder,
-        images: conversionResult.images
-      }
+      sections: sections
+    //   message: 'PDF uploaded and converted successfully',
+    //   file: {
+    //     originalName: req.file.originalname,
+    //     savedAs: req.file.filename,
+    //     size: req.file.size,
+    //     sizeKB: parseFloat((req.file.size / 1024).toFixed(2)),
+    //     path: req.file.path
+    //   },
+    //   conversion: {
+    //     numPages: conversionResult.numPages,
+    //     imagesFolder: conversionResult.imagesFolder,
+    //     images: conversionResult.images
+    //   }
     });
   } else {
     res.status(500).json({
