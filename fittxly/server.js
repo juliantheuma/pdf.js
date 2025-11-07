@@ -213,7 +213,7 @@ async function convertToText(imagesFolder, progressCallback) {
     }
     
     // Secondary company indicators (fallback)
-    const companyIndicators = ['CHICKENNNCNECNEJCNENC'
+    const companyIndicators = ['CHICKENNNCNECNEJCNENC', 'limited'
       // 'company', 'ltd', 'limited', 'inc', 'corp', 'corporation', 'plc', 'llc',
       // 'company number', 'registration number', 'reg no', 'company reg'
     ];
