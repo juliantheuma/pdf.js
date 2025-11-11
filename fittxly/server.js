@@ -318,76 +318,88 @@ async function processPdfPages(pdfPath, progressCallback) {
     // Process each page: convert → OCR → check for sections
     for (let pageNum = 1; pageNum <= numPages; pageNum++) {
       console.log(`\n📍 Processing page ${pageNum}/${numPages}...`);
-      
-      // STEP 1: Convert PDF page to image
-      // if (progressCallback) {
-      //   progressCallback({
-      //     type: 'progress',
-      //     stage: 'converting',
-      //     current: pageNum,
-      //     total: numPages,
-      //     message: `Converting page ${pageNum} of ${numPages} to image`,
-      //     progress: Math.round((pageNum / numPages) * 40) // 0-40% for conversion
-      //   });
-      // }
-      
-      const page = await pdfDocument.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 1.5 });
-      const canvasAndContext = canvasFactory.create(
-        viewport.width,
-        viewport.height
-      );
-      const renderContext = {
-        canvasContext: canvasAndContext.context,
-        viewport,
-      };
 
-      const renderTask = page.render(renderContext);
-      await renderTask.promise;
-      
-      const image = canvasAndContext.canvas.toBuffer("image/png");
-      const outputPath = path.join(imagesFolder, `page-${pageNum}.png`);
-      
-      await fs.promises.writeFile(outputPath, image);
-      page.cleanup();
-      
-      console.log(`  ✅ Image saved: page-${pageNum}.png`);
-      
-      // STEP 2: Run OCR immediately on this page
-      if (progressCallback) {
-        progressCallback({
-          type: 'progress',
-          stage: 'ocr',
-          current: pageNum,
-          total: numPages,
-          message: `Processing OCR on page ${pageNum} of ${numPages}`,
-          progress: Math.round((pageNum / numPages) * 100) // 40-100% for OCR
-        });
-      }
-      
-      const { data: { text } } = await worker.recognize(outputPath);
-      console.log(`  🔍 OCR complete for page ${pageNum}`);
-      
-      // STEP 3: Check if this is a section and emit event immediately
-      const _isSection = checkForNewSection(text);
-      if (_isSection) {
-        const section = {
-          page: pageNum,
-          text: text,
-          documentType: detectDocumentType(text)
-        };
-        sections.push(section);
-        
-        console.log(`  ⭐ Section found on page ${pageNum}!`);
-        
-        // Emit section found event immediately
+      try {
+        // STEP 1: Convert PDF page to image
         if (progressCallback) {
           progressCallback({
-            type: 'section_found',
-            section: section,
-            message: `Found section on page ${pageNum}`
+            type: 'progress',
+            stage: 'converting',
+            current: pageNum,
+            total: numPages,
+            message: `Converting page ${pageNum} of ${numPages} to image`,
+            progress: Math.round((pageNum / numPages) * 40) // 0-40% for conversion
           });
         }
+
+        const page = await pdfDocument.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvasAndContext = canvasFactory.create(
+          viewport.width,
+          viewport.height
+        );
+        const renderContext = {
+          canvasContext: canvasAndContext.context,
+          viewport,
+        };
+
+        await page.render(renderContext).promise;
+
+        const image = canvasAndContext.canvas.toBuffer("image/png");
+        const outputPath = path.join(imagesFolder, `page-${pageNum}.png`);
+
+        await fs.promises.writeFile(outputPath, image);
+        page.cleanup();
+
+        console.log(`  ✅ Image saved: page-${pageNum}.png`);
+
+        // STEP 2: Run OCR immediately on this page
+        if (progressCallback) {
+          progressCallback({
+            type: 'progress',
+            stage: 'ocr',
+            current: pageNum,
+            total: numPages,
+            message: `Processing OCR on page ${pageNum} of ${numPages}`,
+            progress: 40 + Math.round((pageNum / numPages) * 60) // 40-100% for OCR
+          });
+        }
+
+        const { data: { text } } = await worker.recognize(outputPath);
+        console.log(`  🔍 OCR complete for page ${pageNum}`);
+
+        // STEP 3: Check if this is a section and emit event immediately
+        const _isSection = checkForNewSection(text);
+        if (_isSection) {
+          const section = {
+            page: pageNum,
+            text: text,
+            documentType: detectDocumentType(text)
+          };
+          sections.push(section);
+
+          console.log(`  ⭐ Section found on page ${pageNum}!`);
+
+          // Emit section found event immediately
+          if (progressCallback) {
+            progressCallback({
+              type: 'section_found',
+              section: section,
+              message: `Found section on page ${pageNum}`
+            });
+          }
+        }
+      } catch (pageError) {
+        console.error(`❌ Page ${pageNum} failed:`, pageError);
+        if (progressCallback) {
+          progressCallback({
+            type: 'page_error',
+            stage: 'error',
+            page: pageNum,
+            message: `Failed processing page ${pageNum}: ${pageError.message}`
+          });
+        }
+        continue;
       }
     }
     
