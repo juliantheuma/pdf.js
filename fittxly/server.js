@@ -313,7 +313,7 @@ async function processPdfPages(pdfPath, progressCallback) {
     const canvasFactory = pdfDocument.canvasFactory;
     const sections = [];
 
-    const NUM_WORKERS = 128;
+    const NUM_WORKERS = 360;
     const HEADER_PERCENTAGE = 0.1;
     let firstSectionTime = null;
     let firstSectionPage = null;
