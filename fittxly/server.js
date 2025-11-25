@@ -460,15 +460,26 @@ async function processPdfPages(pdfPath, progressCallback) {
       }
     }
 
-    for (let i = 1; i <= numPages; i += NUM_WORKERS) {
-      const batch = [];
-      for (let j = 0; j < NUM_WORKERS && (i + j) <= numPages; j++) {
-        const pageNum = i + j;
-        const worker = workerPool[(pageNum - 1) % NUM_WORKERS];
-        batch.push(processPage(pageNum, worker));
-      }
-      await Promise.all(batch);
+    // Queue-based processing: workers continuously pick up next available page
+    let currentPage = 1;
+    const pagePromises = [];
+
+    // Start all workers processing pages from a shared queue
+    for (let workerIndex = 0; workerIndex < NUM_WORKERS; workerIndex++) {
+      const worker = workerPool[workerIndex];
+      
+      const workerPromise = (async () => {
+        while (currentPage <= numPages) {
+          const pageNum = currentPage++;
+          await processPage(pageNum, worker);
+        }
+      })();
+      
+      pagePromises.push(workerPromise);
     }
+
+    // Wait for all workers to finish
+    await Promise.all(pagePromises);
 
     await Promise.all(workerPool.map((worker) => worker.terminate()));
 
