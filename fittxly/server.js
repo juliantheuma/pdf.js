@@ -30,6 +30,8 @@ async function convertPdfToImages(pdfPath, progressCallback) {
     standardFontDataUrl: "../build/dist/standard_fonts/",
   });
 
+  const startTime = Date.now();
+
   try {
     const pdfDocument = await loadingTask.promise;
     const numPages = pdfDocument.numPages;
@@ -194,7 +196,7 @@ async function convertToText(imagesFolder, progressCallback) {
   // Function to detect document type based on OCR text
   const detectDocumentType = (text) => {
 
-    console.log("text: ", text)
+    // console.log("text: ", text)
     const lowerText = text.toLowerCase();
     
     // Primary company detection - check for specific patterns first
@@ -253,41 +255,49 @@ async function convertToText(imagesFolder, progressCallback) {
   
 
 function checkForNewSection(text) {
-    const keywords = [
-      'Searches Unit',
-      'Group Reference',
-      'IDENTITY',
-      'Archbishop Street',
-      'Search Results',
-      'Searches of',
-      'Liabilities From',
-      'Transfers From',
-    ];
 
-    const lowerText = text.toLowerCase();
-    let foundCount = 0;
-    const foundKeywords = [];
+  // console.log(text)
 
-    keywords.forEach(keyword => {
-      if (lowerText.includes(keyword.toLowerCase())) {
-        foundCount++;
-        foundKeywords.push(keyword);
-      }
-    });
+  const keywords = [
+    'Searches Unit',
+    'IDENTITY',
+    'Archbishop Street',
+    'Valletta',
+    'IDENTITY Searches',
+    'Avchbishop Street',
+    'SEARCHES OF',
+    'LIABILITIES FROM',
+    'TRANSFERS FROM',
+  ];
 
-    if( !lowerText.includes('liabilities') && !lowerText.includes('transfers')){ return false; }
-    if (lowerText.includes('invoice')){ return false; }
+  const lowerText = text.toLowerCase();
+  let foundCount = 0;
+  const foundKeywords = [];
 
-    const isSection = foundCount >= 3;
-    return isSection;
-  };
+  keywords.forEach(keyword => {
+    if (lowerText.includes(keyword.toLowerCase())) {
+      foundCount++;
+      foundKeywords.push(keyword);
+    }
+  });
 
-// Combined PDF processing function - converts and OCRs page by page
+  if (lowerText.includes('invoice')){ return false; }
+  
+  if (lowerText.includes('transfers from')){ return true; }
+  if (lowerText.includes('liabilities from')){ return true; }
+  if (lowerText.includes('searches of')){ return true; }
+
+  const isSection = foundCount >= 1;
+  return isSection;
+};
+
+// Optimized PDF processing function using worker pool + header OCR
 async function processPdfPages(pdfPath, progressCallback) {
   console.log(`🔄 Starting processing of: ${pdfPath}`);
-  
+
+  const startTime = Date.now();
   const data = new Uint8Array(fs.readFileSync(pdfPath));
-  
+
   const loadingTask = getDocument({
     data,
     cMapUrl: "../build/dist/cmaps/",
@@ -299,36 +309,32 @@ async function processPdfPages(pdfPath, progressCallback) {
     const pdfDocument = await loadingTask.promise;
     const numPages = pdfDocument.numPages;
     console.log(`📄 PDF has ${numPages} pages`);
-    
+
     const canvasFactory = pdfDocument.canvasFactory;
     const sections = [];
-    
-    // Create images folder based on PDF filename
-    const pdfBasename = path.basename(pdfPath, '.pdf');
-    const imagesFolder = path.join(__dirname, 'uploads', `${pdfBasename}_images`);
-    
-    // Create the folder if it doesn't exist
-    if (!fs.existsSync(imagesFolder)) {
-      fs.mkdirSync(imagesFolder, { recursive: true });
-    }
-    
-    // Initialize Tesseract worker once for all pages
-    const worker = await createWorker('eng');
-    
-    // Process each page: convert → OCR → check for sections
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-      console.log(`\n📍 Processing page ${pageNum}/${numPages}...`);
 
+    const NUM_WORKERS = 12;
+    const HEADER_PERCENTAGE = 0.1;
+    let firstSectionTime = null;
+    let firstSectionPage = null;
+
+    console.log(`🔧 Creating worker pool (${NUM_WORKERS})...`);
+    const workerPool = await Promise.all(
+      Array(NUM_WORKERS).fill(null).map(() => createWorker('eng'))
+    );
+    console.log(`✅ Worker pool ready`);
+
+    async function processPage(pageNum, worker) {
       try {
-        // STEP 1: Convert PDF page to image
+        const pageStartTime = Date.now();
+
         if (progressCallback) {
           progressCallback({
             type: 'progress',
             stage: 'converting',
             current: pageNum,
             total: numPages,
-            message: `Converting page ${pageNum} of ${numPages} to image`,
-            progress: Math.round((pageNum / numPages) * 40) // 0-40% for conversion
+            message: `Rendering page ${pageNum} of ${numPages}`,
           });
         }
 
@@ -345,50 +351,101 @@ async function processPdfPages(pdfPath, progressCallback) {
 
         await page.render(renderContext).promise;
 
-        const image = canvasAndContext.canvas.toBuffer("image/png");
-        const outputPath = path.join(imagesFolder, `page-${pageNum}.png`);
+        const fullImage = canvasAndContext.canvas.toBuffer("image/png");
 
-        await fs.promises.writeFile(outputPath, image);
+        const headerHeight = Math.max(1, Math.floor(viewport.height * HEADER_PERCENTAGE));
+        const headerCanvasAndContext = canvasFactory.create(
+          viewport.width,
+          headerHeight
+        );
+        const headerContext = headerCanvasAndContext.context;
+        const imageData = canvasAndContext.context.getImageData(
+          0,
+          0,
+          viewport.width,
+          headerHeight
+        );
+        headerContext.putImageData(imageData, 0, 0);
+        const headerImage = headerCanvasAndContext.canvas.toBuffer("image/png");
+
         page.cleanup();
 
-        console.log(`  ✅ Image saved: page-${pageNum}.png`);
-
-        // STEP 2: Run OCR immediately on this page
         if (progressCallback) {
           progressCallback({
             type: 'progress',
-            stage: 'ocr',
+            stage: 'header_ocr',
             current: pageNum,
             total: numPages,
-            message: `Processing OCR on page ${pageNum} of ${numPages}`,
-            progress: 40 + Math.round((pageNum / numPages) * 60) // 40-100% for OCR
+            message: `OCR header on page ${pageNum} of ${numPages}`,
           });
         }
 
-        const { data: { text } } = await worker.recognize(outputPath);
-        console.log(`  🔍 OCR complete for page ${pageNum}`);
+        const { data: { text: headerText } } = await worker.recognize(headerImage);
+        const isSectionHeader = checkForNewSection(headerText);
 
-        // STEP 3: Check if this is a section and emit event immediately
-        const _isSection = checkForNewSection(text);
-        if (_isSection) {
-          const section = {
-            page: pageNum,
-            text: text,
-            documentType: detectDocumentType(text)
-          };
-          sections.push(section);
+        if(pageNum === 206){
+          console.log("headerText: ", headerText)
+        }
 
-          console.log(`  ⭐ Section found on page ${pageNum}!`);
-
-          // Emit section found event immediately
+        if (!isSectionHeader) {
           if (progressCallback) {
             progressCallback({
-              type: 'section_found',
-              section: section,
-              message: `Found section on page ${pageNum}`
+              type: 'progress',
+              stage: 'skipped',
+              current: pageNum,
+              total: numPages,
+              message: `Header didn't match on page ${pageNum}, skipping full OCR`,
+            });
+          }
+          return null;
+        }
+
+        if (progressCallback) {
+          progressCallback({
+            type: 'progress',
+            stage: 'full_ocr',
+            current: pageNum,
+            total: numPages,
+            message: `Header matched! OCR full page ${pageNum}`,
+          });
+        }
+
+        const { data: { text } } = await worker.recognize(fullImage);
+
+        const section = {
+          page: pageNum,
+          text,
+          documentType: detectDocumentType(text),
+        };
+        
+        sections.push(section);
+
+
+        if (!firstSectionTime || pageNum < firstSectionPage) {
+          firstSectionTime = Date.now();
+          firstSectionPage = pageNum;
+
+          if (progressCallback) {
+            progressCallback({
+              type: 'first_section',
+              page: pageNum,
+              message: `First section detected on page ${pageNum}`,
+              timeFromStart: ((firstSectionTime - startTime) / 1000).toFixed(2),
             });
           }
         }
+
+        if (progressCallback) {
+          progressCallback({
+            type: 'section_found',
+            section,
+            message: `Found section on page ${pageNum}`,
+          });
+        }
+
+        const pageDuration = ((Date.now() - pageStartTime) / 1000).toFixed(2);
+        console.log(`  ✅ Page ${pageNum} processed in ${pageDuration}s`);
+        return section;
       } catch (pageError) {
         console.error(`❌ Page ${pageNum} failed:`, pageError);
         if (progressCallback) {
@@ -396,29 +453,42 @@ async function processPdfPages(pdfPath, progressCallback) {
             type: 'page_error',
             stage: 'error',
             page: pageNum,
-            message: `Failed processing page ${pageNum}: ${pageError.message}`
+            message: `Failed processing page ${pageNum}: ${pageError.message}`,
           });
         }
-        continue;
+        return null;
       }
     }
-    
-    // Cleanup
-    await worker.terminate();
-    
+
+    for (let i = 1; i <= numPages; i += NUM_WORKERS) {
+      const batch = [];
+      for (let j = 0; j < NUM_WORKERS && (i + j) <= numPages; j++) {
+        const pageNum = i + j;
+        const worker = workerPool[(pageNum - 1) % NUM_WORKERS];
+        batch.push(processPage(pageNum, worker));
+      }
+      await Promise.all(batch);
+    }
+
+    await Promise.all(workerPool.map((worker) => worker.terminate()));
+
     console.log(`✅ Processing complete! Found ${sections.length} sections`);
-    
+
     return {
       success: true,
       numPages,
-      imagesFolder,
-      sections
+      sections,
+      firstSectionPage,
+      timeToFirstSection: firstSectionTime
+        ? ((firstSectionTime - startTime) / 1000).toFixed(2)
+        : null,
     };
   } catch (error) {
     console.error("❌ Processing error:", error);
+
     return {
       success: false,
-      error: error.message
+      error: error.message,
     };
   }
 }
@@ -482,6 +552,8 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
       type: 'complete',
       success: true,
       sections: result.sections,
+      firstSectionPage: result.firstSectionPage,
+      timeToFirstSection: result.timeToFirstSection,
       progress: 100
     });
 
@@ -530,4 +602,5 @@ app.listen(PORT, () => {
 Ready to accept PDF uploads and convert them!
   `);
 });
+
 
