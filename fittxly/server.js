@@ -372,7 +372,7 @@ async function processPdfPages(pdfPath, progressCallback) {
         }).promise;
     
         // Convert header region to PNG
-        const headerPNG = headerCanvas.canvas.toBuffer("image/png");
+        const headerPNG = headerCanvas.canvas.toBuffer("image/jpeg", { quality: 0.8});
     
         if (!headerPNG || headerPNG.length < 50) {
           throw new Error(`Header PNG invalid on page ${pageNum}`);
@@ -436,7 +436,7 @@ async function processPdfPages(pdfPath, progressCallback) {
         }).promise;
     
         // Convert full page to PNG (Tesseract requirement)
-        const fullPNG = fullCanvas.canvas.toBuffer("image/png");
+        const fullPNG = fullCanvas.canvas.toBuffer("image/jpeg", { quality: 0.8});
     
         if (!fullPNG || fullPNG.length < 100) {
           throw new Error(`Full PNG invalid on page ${pageNum}`);
