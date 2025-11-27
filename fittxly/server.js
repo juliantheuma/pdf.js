@@ -313,7 +313,7 @@ async function processPdfPages(pdfPath, progressCallback) {
     const canvasFactory = pdfDocument.canvasFactory;
     const sections = [];
 
-    const NUM_WORKERS = 64;
+    const NUM_WORKERS = 8;
     const HEADER_PERCENTAGE = 0.1;
     let firstSectionTime = null;
     let firstSectionPage = null;
@@ -327,138 +327,180 @@ async function processPdfPages(pdfPath, progressCallback) {
     async function processPage(pageNum, worker) {
       try {
         const pageStartTime = Date.now();
-
+    
         if (progressCallback) {
           progressCallback({
-            type: 'progress',
-            stage: 'converting',
+            type: "progress",
+            stage: "converting",
             current: pageNum,
             total: numPages,
-            message: `Rendering page ${pageNum} of ${numPages}`,
+            message: `Rendering header of page ${pageNum}/${numPages}`,
           });
         }
-
+    
         const page = await pdfDocument.getPage(pageNum);
-        const viewport = page.getViewport({ scale: 1.5 });
-        const canvasAndContext = canvasFactory.create(
-          viewport.width,
-          viewport.height
+    
+        // Full page viewport (used later if needed)
+        const fullViewport = page.getViewport({ scale: 1.5 });
+    
+        // -------------------------------
+        // 1️⃣ HEADER-ONLY RENDER
+        // -------------------------------
+    
+        let headerHeight = Math.floor(fullViewport.height * HEADER_PERCENTAGE);
+        if (headerHeight < 10) headerHeight = 10; // Safety
+    
+        // Cropped viewport for header-only rendering
+        const headerViewport = page.getViewport({
+          scale: 1.5,
+          rotation: page.rotate,
+        });
+    
+        // Clip to header region
+        headerViewport.height = headerHeight;
+        headerViewport.viewBox = [0, 0, fullViewport.width, headerHeight];
+    
+        const headerCanvas = canvasFactory.create(
+          headerViewport.width,
+          headerViewport.height
         );
-        const renderContext = {
-          canvasContext: canvasAndContext.context,
-          viewport,
-        };
-
-        await page.render(renderContext).promise;
-
-        const fullImage = canvasAndContext.canvas.toBuffer("image/png");
-
-        const headerHeight = Math.max(1, Math.floor(viewport.height * HEADER_PERCENTAGE));
-        const headerCanvasAndContext = canvasFactory.create(
-          viewport.width,
-          headerHeight
-        );
-        const headerContext = headerCanvasAndContext.context;
-        const imageData = canvasAndContext.context.getImageData(
-          0,
-          0,
-          viewport.width,
-          headerHeight
-        );
-        headerContext.putImageData(imageData, 0, 0);
-        const headerImage = headerCanvasAndContext.canvas.toBuffer("image/png");
-
-        page.cleanup();
-
+    
+        // Render ONLY the header area
+        await page.render({
+          canvasContext: headerCanvas.context,
+          viewport: headerViewport,
+        }).promise;
+    
+        // Convert header region to PNG
+        const headerPNG = headerCanvas.canvas.toBuffer("image/png");
+    
+        if (!headerPNG || headerPNG.length < 50) {
+          throw new Error(`Header PNG invalid on page ${pageNum}`);
+        }
+    
         if (progressCallback) {
           progressCallback({
-            type: 'progress',
-            stage: 'header_ocr',
+            type: "progress",
+            stage: "header_ocr",
             current: pageNum,
             total: numPages,
-            message: `OCR header on page ${pageNum} of ${numPages}`,
+            message: `OCR header on page ${pageNum}`,
           });
         }
-
-        const { data: { text: headerText } } = await worker.recognize(headerImage);
+    
+        // OCR header
+        const { data: { text: headerText } } = await worker.recognize(headerPNG);
         const isSectionHeader = checkForNewSection(headerText);
-
-        if(pageNum === 206){
-          console.log("headerText: ", headerText)
-        }
-
+    
+        // ===============================
+        //  SKIP FULL OCR IF NO MATCH
+        // ===============================
         if (!isSectionHeader) {
+          page.cleanup();
+    
           if (progressCallback) {
             progressCallback({
-              type: 'progress',
-              stage: 'skipped',
+              type: "progress",
+              stage: "skipped",
               current: pageNum,
               total: numPages,
-              message: `Header didn't match on page ${pageNum}, skipping full OCR`,
+              message: `Header did not match — skipping full OCR`,
             });
           }
+    
           return null;
         }
-
+    
+        // -------------------------------
+        // 2️⃣ FULL PAGE OCR (ONLY IF MATCH)
+        // -------------------------------
+    
         if (progressCallback) {
           progressCallback({
-            type: 'progress',
-            stage: 'full_ocr',
+            type: "progress",
+            stage: "full_ocr",
             current: pageNum,
             total: numPages,
-            message: `Header matched! OCR full page ${pageNum}`,
+            message: `Header matched — full OCR for page ${pageNum}`,
           });
         }
-
-        const { data: { text } } = await worker.recognize(fullImage);
-
+    
+        const fullCanvas = canvasFactory.create(
+          fullViewport.width,
+          fullViewport.height
+        );
+    
+        await page.render({
+          canvasContext: fullCanvas.context,
+          viewport: fullViewport,
+        }).promise;
+    
+        // Convert full page to PNG (Tesseract requirement)
+        const fullPNG = fullCanvas.canvas.toBuffer("image/png");
+    
+        if (!fullPNG || fullPNG.length < 100) {
+          throw new Error(`Full PNG invalid on page ${pageNum}`);
+        }
+    
+        // OCR full page
+        const { data: { text } } = await worker.recognize(fullPNG);
+    
+        page.cleanup();
+    
+        // Save section
         const section = {
           page: pageNum,
           text,
           documentType: detectDocumentType(text),
         };
-        
+    
         sections.push(section);
-
-
+    
+        // Track first detected section
         if (!firstSectionTime || pageNum < firstSectionPage) {
           firstSectionTime = Date.now();
           firstSectionPage = pageNum;
-
+    
           if (progressCallback) {
             progressCallback({
-              type: 'first_section',
+              type: "first_section",
               page: pageNum,
-              message: `First section detected on page ${pageNum}`,
+              message: `First section detected`,
               timeFromStart: ((firstSectionTime - startTime) / 1000).toFixed(2),
             });
           }
         }
-
+    
         if (progressCallback) {
           progressCallback({
-            type: 'section_found',
+            type: "section_found",
             section,
             message: `Found section on page ${pageNum}`,
           });
         }
-
-        const pageDuration = ((Date.now() - pageStartTime) / 1000).toFixed(2);
-        console.log(`  ✅ Page ${pageNum} processed in ${pageDuration}s`);
+    
+        const duration = ((Date.now() - pageStartTime) / 1000).toFixed(2);
+        console.log(`  ✅ Page ${pageNum} processed in ${duration}s`);
+    
         return section;
+    
       } catch (pageError) {
         console.error(`❌ Page ${pageNum} failed:`, pageError);
+    
         if (progressCallback) {
           progressCallback({
-            type: 'page_error',
-            stage: 'error',
+            type: "page_error",
+            stage: "error",
             page: pageNum,
-            message: `Failed processing page ${pageNum}: ${pageError.message}`,
+            message: pageError.message,
           });
         }
+    
         return null;
       }
     }
+    
+    
 
     // Queue-based processing: workers continuously pick up next available page
     let currentPage = 1;
