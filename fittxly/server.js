@@ -256,13 +256,15 @@ async function convertToText(imagesFolder, progressCallback) {
 
 function checkForNewSection(text) {
 
-  // console.log(text)
+  console.log(text)
 
   const keywords = [
     'Searches Unit',
     'IDENTITY',
     'Archbishop Street',
+    'Achbishop Street',
     'Valletta',
+    'bishop',
     'IDENTITY Searches',
     'Avchbishop Street',
     'SEARCHES OF',
