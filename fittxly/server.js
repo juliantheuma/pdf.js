@@ -28,6 +28,7 @@ async function convertPdfToImages(pdfPath, progressCallback) {
     cMapUrl: "../build/dist/cmaps/",
     cMapPacked: true,
     standardFontDataUrl: "../build/dist/standard_fonts/",
+    wasmUrl: "../build/dist/wasm/",
   });
 
   const startTime = Date.now();
@@ -36,7 +37,7 @@ async function convertPdfToImages(pdfPath, progressCallback) {
     const pdfDocument = await loadingTask.promise;
     const numPages = pdfDocument.numPages;
     console.log(`📄 PDF has ${numPages} pages`);
-    
+
     const canvasFactory = pdfDocument.canvasFactory;
     const convertedImages = [];
     
@@ -305,6 +306,7 @@ async function processPdfPages(pdfPath, progressCallback) {
     cMapUrl: "../build/dist/cmaps/",
     cMapPacked: true,
     standardFontDataUrl: "../build/dist/standard_fonts/",
+    wasmUrl: "../build/dist/wasm/",
   });
 
   try {
