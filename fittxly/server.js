@@ -231,7 +231,7 @@ async function convertToText(imagesFolder, progressCallback) {
       'name', 'spouse',
       'date of birth', 'birthplace',
       'father', 'mother',
-      'id card', 'passport',
+      'id card', 'passport', 'nee'
     ];
     
     // Count matches for each category
