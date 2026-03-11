@@ -8,6 +8,8 @@ services:
     volumes:
       # Mount uploads directory to persist files
       - ./fittxly/uploads:/app/fittxly/uploads
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
     restart: unless-stopped

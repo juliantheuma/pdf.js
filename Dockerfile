@@ -24,9 +24,6 @@ RUN npm install
 # Copy the entire project
 COPY . .
 
-# Run gulp dist-install
-RUN npx gulp dist-install
-
 # Change to fittxly directory and install dependencies
 WORKDIR /app/fittxly
 
