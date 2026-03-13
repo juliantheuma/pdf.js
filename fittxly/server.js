@@ -28,6 +28,9 @@ const CLAUDE_MODEL = "claude-haiku-4-5";
 const CLAUDE_SYSTEM_PROMPT = `You are a document data extraction tool.
 Extract the following fields from the document image:
 
+Document type (required):
+  - document_type: either "COMPANY" or "INDIVIDUAL" — classify the document as a company search/registration document or an individual/personal search document based on the content and structure.
+
 Personal details:
   - name
   - spouse
@@ -47,6 +50,7 @@ Date fields (normalise all to YYYY-MM-DD):
 
 Return ONLY a JSON object with these exact keys.
 If a field is not found or not applicable, set its value to null.
+document_type must always be either "COMPANY" or "INDIVIDUAL".
 Make sure that the dates are correct, and the numbers are correct.
 Make sure that the dates are in the correct format YYYY-MM-DD, Where MM is 01-12 and DD is 01-31.
 Do not include any explanation or extra text — only the JSON object.`;
@@ -563,11 +567,15 @@ async function processPdfPages(pdfPath, progressCallback) {
     
         page.cleanup();
     
-        // Save section
+        // Save section (document type from Anthropic when available, else heuristic)
+        const documentType =
+          suggestions?.document_type === "COMPANY" || suggestions?.document_type === "INDIVIDUAL"
+            ? suggestions.document_type
+            : detectDocumentType(text);
         const section = {
           page: pageNum,
           text,
-          documentType: detectDocumentType(text),
+          documentType,
           suggestions: suggestions || null,
         };
     
