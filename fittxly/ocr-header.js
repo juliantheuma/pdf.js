@@ -1,11 +1,23 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { getDocument } from "../build/dist/legacy/build/pdf.mjs";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { createWorker } from 'tesseract.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const PDFJS_DIST_DIR_CANDIDATES = [
+  path.join(__dirname, "..", "node_modules", "pdfjs-dist"),
+  path.join(__dirname, "node_modules", "pdfjs-dist"),
+];
+const PDFJS_DIST_DIR =
+  PDFJS_DIST_DIR_CANDIDATES.find(candidate => fs.existsSync(candidate)) ??
+  PDFJS_DIST_DIR_CANDIDATES[0];
+const PDFJS_LOADING_OPTIONS = {
+  cMapUrl: `${path.join(PDFJS_DIST_DIR, "cmaps")}${path.sep}`,
+  cMapPacked: true,
+  standardFontDataUrl: `${path.join(PDFJS_DIST_DIR, "standard_fonts")}${path.sep}`,
+};
 
 // Get PDF path from command line argument or use default
 const pdfPath = process.argv[2] || path.join(__dirname, 'Searches Borg Jonathan & Giselle 19-10-2022-1-228.pdf');
@@ -67,9 +79,7 @@ async function ocrPdfHeader(pdfPath) {
     const data = new Uint8Array(fs.readFileSync(pdfPath));
     const loadingTask = getDocument({
       data,
-      cMapUrl: "../build/dist/cmaps/",
-      cMapPacked: true,
-      standardFontDataUrl: "../build/dist/standard_fonts/",
+      ...PDFJS_LOADING_OPTIONS,
     });
 
     const pdfDocument = await loadingTask.promise;

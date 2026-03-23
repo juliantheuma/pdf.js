@@ -1,5 +1,5 @@
 # Use Node.js LTS version
-FROM node:20-bullseye
+FROM node:22-bullseye
 
 # Install system dependencies for canvas and PDF.js
 RUN apt-get update && apt-get install -y \

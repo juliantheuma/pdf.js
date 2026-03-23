@@ -13,7 +13,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const PDFJS_DIST_DIR_CANDIDATES = [
+  path.join(__dirname, "..", "node_modules", "pdfjs-dist"),
+  path.join(__dirname, "node_modules", "pdfjs-dist"),
+];
+const PDFJS_DIST_DIR =
+  PDFJS_DIST_DIR_CANDIDATES.find(candidate => fs.existsSync(candidate)) ??
+  PDFJS_DIST_DIR_CANDIDATES[0];
+const PDFJS_LOADING_OPTIONS = {
+  cMapUrl: `${path.join(PDFJS_DIST_DIR, "cmaps")}${path.sep}`,
+  cMapPacked: true,
+  standardFontDataUrl: `${path.join(PDFJS_DIST_DIR, "standard_fonts")}${path.sep}`,
+};
 
 // Enable CORS for all origins
 app.use(cors());
@@ -135,10 +147,7 @@ async function convertPdfToImages(pdfPath, progressCallback) {
   
   const loadingTask = getDocument({
     data,
-    cMapUrl: "../build/dist/cmaps/",
-    cMapPacked: true,
-    standardFontDataUrl: "../build/dist/standard_fonts/",
-    wasmUrl: "../build/dist/wasm/",
+    ...PDFJS_LOADING_OPTIONS,
   });
 
   const startTime = Date.now();
@@ -413,10 +422,7 @@ async function processPdfPages(pdfPath, progressCallback) {
 
   const loadingTask = getDocument({
     data,
-    cMapUrl: "../build/dist/cmaps/",
-    cMapPacked: true,
-    standardFontDataUrl: "../build/dist/standard_fonts/",
-    wasmUrl: "../build/dist/wasm/",
+    ...PDFJS_LOADING_OPTIONS,
   });
 
   try {
