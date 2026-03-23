@@ -28,9 +28,6 @@ const CLAUDE_MODEL = "claude-haiku-4-5";
 const CLAUDE_SYSTEM_PROMPT = `You are a document data extraction tool.
 Extract the following fields from the document image:
 
-Document type (required):
-  - document_type: either "COMPANY" or "INDIVIDUAL" — classify the document as a company search/registration document or an individual/personal search document based on the content and structure.
-
 Personal details:
   - name
   - spouse
@@ -49,6 +46,9 @@ Date fields (normalise all to YYYY-MM-DD):
   - fidi_to
 
 Return ONLY a JSON object with these exact keys.
+Name can be either a human's name or a company name.
+If the name is a company name, set document_type to "COMPANY".
+If the name is a human's name, set document_type to "INDIVIDUAL".
 If a field is not found or not applicable, set its value to null.
 document_type must always be either "COMPANY" or "INDIVIDUAL".
 Make sure that the dates are correct, and the numbers are correct.
@@ -98,6 +98,7 @@ async function extractDatesFromImageBuffer(imageBuffer, mediaType = "image/png")
 
   let dates = null;
   try {
+    console.log("CLAUDE text: ", text)
     dates = JSON.parse(text);
   } catch {
     const match = text.match(/\{[\s\S]*\}/);
@@ -325,7 +326,7 @@ async function convertToText(imagesFolder, progressCallback) {
     }
     
     // Secondary company indicators (fallback)
-    const companyIndicators = ['CHICKENNNCNECNEJCNENC', 'limited'
+    const companyIndicators = ['CHICKENNNCNECNEJCNENC',
       // 'company', 'ltd', 'limited', 'inc', 'corp', 'corporation', 'plc', 'llc',
       // 'company number', 'registration number', 'reg no', 'company reg'
     ];
