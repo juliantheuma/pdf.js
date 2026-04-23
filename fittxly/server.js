@@ -376,25 +376,37 @@ async function convertToText(imagesFolder, progressCallback) {
 
 function checkForNewSection(text) {
 
-  console.log(text)
+  // console.log(text)
 
   const keywords = [
     'Searches Unit',
+    'Searches Results',
     'IDENTITY',
-    'Archbishop Street',
-    'Achbishop Street',
-    'Valletta',
-    'bishop',
+    'Front Page',
+    // 'Archbishop Street',
+    // 'Achbishop Street',
+    // 'Valletta',
+    // 'bishop',
     'IDENTITY Searches',
-    'Avchbishop Street',
+    // 'Avchbishop Street',
+
+  ];
+
+  const keywords2 = [
     'SEARCHES OF',
     'LIABILITIES FROM',
     'TRANSFERS FROM',
-  ];
+    'TRANSFERS TO',
+    'LIABILITIES TO',
+    'FIDI FROM',
+    'FIDI TO',
+  ]
 
   const lowerText = text.toLowerCase();
   let foundCount = 0;
+  let foundCount2 = 0;
   const foundKeywords = [];
+  const foundKeywords2 = [];
 
   keywords.forEach(keyword => {
     if (lowerText.includes(keyword.toLowerCase())) {
@@ -403,13 +415,21 @@ function checkForNewSection(text) {
     }
   });
 
-  if (lowerText.includes('invoice')){ return false; }
-  
-  if (lowerText.includes('transfers from')){ return true; }
-  if (lowerText.includes('liabilities from')){ return true; }
-  if (lowerText.includes('searches of')){ return true; }
+  keywords2.forEach(keyword => {
+    if (lowerText.includes(keyword.toLowerCase())) {
+      foundCount2++;
+      foundKeywords2.push(keyword);
+    }
+  });
 
-  const isSection = foundCount >= 1;
+  console.log("foundKeywords: ", foundKeywords)
+  console.log("foundKeywords2: ", foundKeywords2)
+
+  if (lowerText.includes('invoice')){ return false; }
+  // if (lowerText.includes('no remarks')){ return false; }
+
+  const isSection = foundCount >= 1 && foundCount2 >= 1;
+  if(isSection) { console.log(text) }
   return isSection;
 };
 
@@ -434,7 +454,7 @@ async function processPdfPages(pdfPath, progressCallback) {
     const sections = [];
 
     const NUM_WORKERS = 8;
-    const HEADER_PERCENTAGE = 0.1;
+    const HEADER_PERCENTAGE = 0.5;
     let firstSectionTime = null;
     let firstSectionPage = null;
 
@@ -702,7 +722,7 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
   // Helper function to send SSE messages
   const sendProgress = (data) => {
 
-    console.log("Sending progress!");
+    // console.log("Sending progress!");
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
