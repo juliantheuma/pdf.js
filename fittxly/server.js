@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -247,12 +248,25 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
     fileSize: 2000 * 1024 * 1024 // 50MB limit
   }
+});
+
+// Multer config for PNG image uploads (used by /suggest-page)
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'image/png' || file.mimetype === 'image/jpeg') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PNG or JPEG images are allowed!'), false);
+    }
+  },
+  limits: { fileSize: 50 * 1024 * 1024 }
 });
 
 async function convertToText(imagesFolder, progressCallback) {
@@ -771,6 +785,27 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
       message: 'Processing failed'
     });
     res.end();
+  }
+});
+
+// Suggest endpoint: accepts a single PNG/JPEG page image and returns Claude suggestions
+app.post('/suggest-page', imageUpload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No image uploaded' });
+  }
+
+  try {
+    const mediaType = req.file.mimetype === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const suggestions = await extractDatesFromImageBuffer(req.file.buffer, mediaType);
+
+    if (!suggestions) {
+      return res.status(422).json({ success: false, error: 'Claude could not extract data from the image' });
+    }
+
+    return res.json({ success: true, suggestions });
+  } catch (error) {
+    console.error('❌ /suggest-page error:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
