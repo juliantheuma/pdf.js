@@ -459,8 +459,11 @@ async function processPdfPages(pdfPath, progressCallback) {
     ...PDFJS_LOADING_OPTIONS,
   });
 
+  let pdfDocument = null;
+  let workerPool = [];
+
   try {
-    const pdfDocument = await loadingTask.promise;
+    pdfDocument = await loadingTask.promise;
     const numPages = pdfDocument.numPages;
     console.log(`📄 PDF has ${numPages} pages`);
 
@@ -473,15 +476,19 @@ async function processPdfPages(pdfPath, progressCallback) {
     let firstSectionPage = null;
 
     console.log(`🔧 Creating worker pool (${NUM_WORKERS})...`);
-    const workerPool = await Promise.all(
+    workerPool = await Promise.all(
       Array(NUM_WORKERS).fill(null).map(() => createWorker('eng'))
     );
     console.log(`✅ Worker pool ready`);
 
     async function processPage(pageNum, worker) {
+      let page = null;
+      let headerCanvas = null;
+      let fullCanvas = null;
+
       try {
         const pageStartTime = Date.now();
-    
+
         if (progressCallback) {
           progressCallback({
             type: "progress",
@@ -491,47 +498,40 @@ async function processPdfPages(pdfPath, progressCallback) {
             message: `Rendering header of page ${pageNum}/${numPages}`,
           });
         }
-    
-        const page = await pdfDocument.getPage(pageNum);
-    
-        // Full page viewport (used later if needed)
+
+        page = await pdfDocument.getPage(pageNum);
+
         const fullViewport = page.getViewport({ scale: 1.5 });
-    
-        // -------------------------------
-        // 1️⃣ HEADER-ONLY RENDER
-        // -------------------------------
-    
+
         let headerHeight = Math.floor(fullViewport.height * HEADER_PERCENTAGE);
-        if (headerHeight < 10) headerHeight = 10; // Safety
-    
-        // Cropped viewport for header-only rendering
+        if (headerHeight < 10) headerHeight = 10;
+
         const headerViewport = page.getViewport({
           scale: 1.5,
           rotation: page.rotate,
         });
-    
-        // Clip to header region
+
         headerViewport.height = headerHeight;
         headerViewport.viewBox = [0, 0, fullViewport.width, headerHeight];
-    
-        const headerCanvas = canvasFactory.create(
+
+        headerCanvas = canvasFactory.create(
           headerViewport.width,
           headerViewport.height
         );
-    
-        // Render ONLY the header area
+
         await page.render({
           canvasContext: headerCanvas.context,
           viewport: headerViewport,
         }).promise;
-    
-        // Convert header region to PNG
+
         const headerPNG = headerCanvas.canvas.toBuffer("image/jpeg", { quality: 0.8});
-    
+        canvasFactory.destroy(headerCanvas);
+        headerCanvas = null;
+
         if (!headerPNG || headerPNG.length < 50) {
           throw new Error(`Header PNG invalid on page ${pageNum}`);
         }
-    
+
         if (progressCallback) {
           progressCallback({
             type: "progress",
@@ -541,17 +541,14 @@ async function processPdfPages(pdfPath, progressCallback) {
             message: `OCR header on page ${pageNum}`,
           });
         }
-    
-        // OCR header
+
         const { data: { text: headerText } } = await worker.recognize(headerPNG);
         const isSectionHeader = checkForNewSection(headerText);
-    
-        // ===============================
-        //  SKIP FULL OCR IF NO MATCH
-        // ===============================
+
         if (!isSectionHeader) {
           page.cleanup();
-    
+          page = null;
+
           if (progressCallback) {
             progressCallback({
               type: "progress",
@@ -561,14 +558,10 @@ async function processPdfPages(pdfPath, progressCallback) {
               message: `Header did not match — skipping full OCR`,
             });
           }
-    
+
           return null;
         }
-    
-        // -------------------------------
-        // 2️⃣ FULL PAGE OCR (ONLY IF MATCH)
-        // -------------------------------
-    
+
         if (progressCallback) {
           progressCallback({
             type: "progress",
@@ -578,37 +571,37 @@ async function processPdfPages(pdfPath, progressCallback) {
             message: `Header matched — full OCR for page ${pageNum}`,
           });
         }
-    
-        const fullCanvas = canvasFactory.create(
+
+        fullCanvas = canvasFactory.create(
           fullViewport.width,
           fullViewport.height
         );
-    
+
         await page.render({
           canvasContext: fullCanvas.context,
           viewport: fullViewport,
         }).promise;
-    
-        // Convert full page to JPEG (for Tesseract & Claude vision)
+
         const fullPNG = fullCanvas.canvas.toBuffer("image/jpeg", { quality: 0.8});
-    
+        canvasFactory.destroy(fullCanvas);
+        fullCanvas = null;
+
         if (!fullPNG || fullPNG.length < 100) {
           throw new Error(`Full PNG invalid on page ${pageNum}`);
         }
-    
-        // OCR full page
+
         const { data: { text } } = await worker.recognize(fullPNG);
-    
+
         let suggestions = null;
         try {
           suggestions = await extractDatesFromImageBuffer(fullPNG, "image/jpeg");
         } catch (suggestionError) {
           console.error(`❌ Claude suggestions failed on page ${pageNum}:`, suggestionError);
         }
-    
+
         page.cleanup();
-    
-        // Save section (document type from Anthropic when available, else heuristic)
+        page = null;
+
         const documentType =
           suggestions?.document_type === "COMPANY" || suggestions?.document_type === "INDIVIDUAL"
             ? suggestions.document_type
@@ -619,14 +612,13 @@ async function processPdfPages(pdfPath, progressCallback) {
           documentType,
           suggestions: suggestions || null,
         };
-    
+
         sections.push(section);
-    
-        // Track first detected section
+
         if (!firstSectionTime || pageNum < firstSectionPage) {
           firstSectionTime = Date.now();
           firstSectionPage = pageNum;
-    
+
           if (progressCallback) {
             progressCallback({
               type: "first_section",
@@ -636,7 +628,7 @@ async function processPdfPages(pdfPath, progressCallback) {
             });
           }
         }
-    
+
         if (progressCallback) {
           progressCallback({
             type: "section_found",
@@ -644,15 +636,19 @@ async function processPdfPages(pdfPath, progressCallback) {
             message: `Found section on page ${pageNum}`,
           });
         }
-    
+
         const duration = ((Date.now() - pageStartTime) / 1000).toFixed(2);
         console.log(`  ✅ Page ${pageNum} processed in ${duration}s`);
-    
+
         return section;
-    
+
       } catch (pageError) {
         console.error(`❌ Page ${pageNum} failed:`, pageError);
-    
+
+        if (headerCanvas) { canvasFactory.destroy(headerCanvas); }
+        if (fullCanvas) { canvasFactory.destroy(fullCanvas); }
+        if (page) { page.cleanup(); }
+
         if (progressCallback) {
           progressCallback({
             type: "page_error",
@@ -661,35 +657,29 @@ async function processPdfPages(pdfPath, progressCallback) {
             message: pageError.message,
           });
         }
-    
+
         return null;
       }
     }
-    
-    
 
     // Queue-based processing: workers continuously pick up next available page
     let currentPage = 1;
     const pagePromises = [];
 
-    // Start all workers processing pages from a shared queue
     for (let workerIndex = 0; workerIndex < NUM_WORKERS; workerIndex++) {
       const worker = workerPool[workerIndex];
-      
+
       const workerPromise = (async () => {
         while (currentPage <= numPages) {
           const pageNum = currentPage++;
           await processPage(pageNum, worker);
         }
       })();
-      
+
       pagePromises.push(workerPromise);
     }
 
-    // Wait for all workers to finish
     await Promise.all(pagePromises);
-
-    await Promise.all(workerPool.map((worker) => worker.terminate()));
 
     console.log(`✅ Processing complete! Found ${sections.length} sections`);
 
@@ -709,6 +699,9 @@ async function processPdfPages(pdfPath, progressCallback) {
       success: false,
       error: error.message,
     };
+  } finally {
+    await Promise.all(workerPool.map((w) => w.terminate()));
+    if (pdfDocument) { pdfDocument.destroy(); }
   }
 }
 // Upload endpoint with Server-Sent Events for progress
@@ -740,17 +733,25 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
+  const filePath = req.file.path;
+
+  const cleanup = () => {
+    fs.unlink(filePath, (err) => {
+      if (err) console.error('❌ Failed to delete uploaded file:', err.message);
+    });
+  };
+
   try {
     // Send initial progress
-    sendProgress({ 
+    sendProgress({
       type: 'progress',
-      stage: 'uploading', 
+      stage: 'uploading',
       message: 'File uploaded successfully, starting processing...',
       progress: 0
     });
 
     // Process PDF with combined page-by-page approach
-    const result = await processPdfPages(req.file.path, (progressData) => {
+    const result = await processPdfPages(filePath, (progressData) => {
       // Forward all progress events to client
       sendProgress(progressData);
     });
@@ -761,6 +762,7 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
         error: result.error,
         message: 'PDF processing failed'
       });
+      cleanup();
       return res.end();
     }
 
@@ -776,6 +778,7 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
       progress: 100
     });
 
+    cleanup();
     res.end();
   } catch (error) {
     console.error('❌ Processing error:', error);
@@ -784,6 +787,7 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
       error: error.message,
       message: 'Processing failed'
     });
+    cleanup();
     res.end();
   }
 });
@@ -810,7 +814,7 @@ app.post('/suggest-page', imageUpload.single('image'), async (req, res) => {
 });
 
 // Error handling middleware
-app.use((err, req, res, next) => {
+app.use((err, _req, res, next) => {
   if (err instanceof multer.MulterError) {
     console.error('❌ Multer error:', err.message);
     return res.status(400).json({
