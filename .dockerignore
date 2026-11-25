@@ -4,7 +4,7 @@ npm-debug.log
 .gitignore
 *.md
 .DS_Store
-.env
+**/.env
 .vscode
 .idea
 *.log

@@ -4,10 +4,9 @@ import cors from 'cors';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { fork } from 'child_process';
 import { fileURLToPath } from 'url';
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { createWorker } from 'tesseract.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { extractDatesFromImageBuffer } from './claude.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,218 +14,11 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const PDFJS_DIST_DIR_CANDIDATES = [
-  path.join(__dirname, "..", "node_modules", "pdfjs-dist"),
-  path.join(__dirname, "node_modules", "pdfjs-dist"),
-];
-const PDFJS_DIST_DIR =
-  PDFJS_DIST_DIR_CANDIDATES.find(candidate => fs.existsSync(candidate)) ??
-  PDFJS_DIST_DIR_CANDIDATES[0];
-const PDFJS_LOADING_OPTIONS = {
-  cMapUrl: `${path.join(PDFJS_DIST_DIR, "cmaps")}${path.sep}`,
-  cMapPacked: true,
-  standardFontDataUrl: `${path.join(PDFJS_DIST_DIR, "standard_fonts")}${path.sep}`,
-};
+const PDF_JOB_SCRIPT = path.join(__dirname, 'pdf-job.js');
 
 // Enable CORS for all origins
 app.use(cors());
 
-// Claude vision client & config
-const anthropicClient = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
-
-const CLAUDE_MODEL = "claude-haiku-4-5";
-
-const CLAUDE_SYSTEM_PROMPT = `You are a document data extraction tool.
-Extract the following fields from the document image:
-
-Personal details:
-  - name
-  - spouse
-  - father
-  - mother
-  - id_card
-  - birthplace
-  - date_of_birth  (normalise to YYYY-MM-DD)
-
-Date fields (normalise all to YYYY-MM-DD):
-  - liabilities_from
-  - liabilities_to
-  - transfers_from
-  - transfers_to
-  - fidi_from
-  - fidi_to
-
-Return ONLY a JSON object with these exact keys.
-Name can be either a human's name or a company name.
-If the name is a company name, set document_type to "COMPANY".
-If the name is a human's name, set document_type to "INDIVIDUAL".
-If a field is not found or not applicable, set its value to null.
-document_type must always be either "COMPANY" or "INDIVIDUAL".
-Make sure that the dates are correct, and the numbers are correct.
-Make sure that the dates are in the correct format YYYY-MM-DD, Where MM is 01-12 and DD is 01-31.
-Do not include any explanation or extra text — only the JSON object.`;
-
-async function extractDatesFromImageBuffer(imageBuffer, mediaType = "image/png") {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn("ANTHROPIC_API_KEY is not set; skipping suggestions extraction.");
-    return null;
-  }
-
-  const base64Data = imageBuffer.toString("base64");
-
-  const response = await anthropicClient.messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: 1024,
-    system: CLAUDE_SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: mediaType,
-              data: base64Data,
-            },
-          },
-          {
-            type: "text",
-            text: "Extract the liabilities, transfers, and fidi date fields from this document.",
-          },
-        ],
-      },
-    ],
-  });
-
-  const firstContent = response.content?.[0];
-  const text = (firstContent && firstContent.type === "text" && firstContent.text?.trim()) || "";
-
-  if (!text) {
-    console.warn("Claude response had no text content.");
-    return null;
-  }
-
-  let dates = null;
-  try {
-    console.log("CLAUDE text: ", text)
-    dates = JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        dates = JSON.parse(match[0]);
-      } catch {
-        console.warn("Failed to parse JSON from Claude response substring.");
-      }
-    } else {
-      console.warn("Could not find JSON object in Claude response:", text);
-    }
-  }
-
-  if (!dates || typeof dates !== "object") {
-    dates = null;
-  }
-
-  const usage = response.usage;
-  if (usage) {
-    console.log(
-      `Claude tokens — input: ${usage.input_tokens}, output: ${usage.output_tokens}`
-    );
-  }
-
-  return dates;
-}
-
-// PDF to PNG conversion function
-async function convertPdfToImages(pdfPath, progressCallback) {
-  console.log(`🔄 Starting conversion of: ${pdfPath}`);
-  
-  const data = new Uint8Array(fs.readFileSync(pdfPath));
-  
-  const loadingTask = getDocument({
-    data,
-    ...PDFJS_LOADING_OPTIONS,
-  });
-
-  const startTime = Date.now();
-
-  try {
-    const pdfDocument = await loadingTask.promise;
-    const numPages = pdfDocument.numPages;
-    console.log(`📄 PDF has ${numPages} pages`);
-
-    const canvasFactory = pdfDocument.canvasFactory;
-    const convertedImages = [];
-    
-    // Create images folder based on PDF filename
-    const pdfBasename = path.basename(pdfPath, '.pdf');
-    const imagesFolder = path.join(__dirname, 'uploads', `${pdfBasename}_images`);
-    
-    // Create the folder if it doesn't exist
-    if (!fs.existsSync(imagesFolder)) {
-      fs.mkdirSync(imagesFolder, { recursive: true });
-    }
-    
-    // Loop through all pages
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-      console.log(`  Processing page ${pageNum}/${numPages}...`);
-      
-      if (progressCallback) {
-        progressCallback({
-          stage: 'converting',
-          current: pageNum,
-          total: numPages,
-          message: `Converting page ${pageNum} of ${numPages} to image`
-        });
-      }
-      
-      const page = await pdfDocument.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 1.5 });
-      const canvasAndContext = canvasFactory.create(
-        viewport.width,
-        viewport.height
-      );
-      const renderContext = {
-        canvasContext: canvasAndContext.context,
-        viewport,
-      };
-
-      const renderTask = page.render(renderContext);
-      await renderTask.promise;
-      
-      const image = canvasAndContext.canvas.toBuffer("image/png");
-      const outputPath = path.join(imagesFolder, `page-${pageNum}.png`);
-      
-      await fs.promises.writeFile(outputPath, image);
-      convertedImages.push({
-        page: pageNum,
-        filename: `page-${pageNum}.png`,
-        path: outputPath,
-        relativePath: `${pdfBasename}_images/page-${pageNum}.png`
-      });
-      
-      page.cleanup();
-    }
-    
-    console.log(`✅ Conversion complete! Created ${numPages} images in: ${imagesFolder}`);
-    
-    return {
-      success: true,
-      numPages,
-      imagesFolder,
-      images: convertedImages
-    };
-  } catch (error) {
-    console.error("❌ Conversion error:", error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -269,441 +61,49 @@ const imageUpload = multer({
   limits: { fileSize: 50 * 1024 * 1024 }
 });
 
-async function convertToText(imagesFolder, progressCallback) {
-    console.log(`🔄 Starting conversion of: ${imagesFolder}`);
-  
-    const worker = await createWorker('eng');
-    const sections = [];
-  
-    const files = fs.readdirSync(imagesFolder)
-      .filter(f => f.endsWith('.png'))
-      .sort((a, b) => {
-        const numA = parseInt(a.match(/\d+/)[0], 10);
-        const numB = parseInt(b.match(/\d+/)[0], 10);
-        return numA - numB;
+
+// PDF jobs run in a child process (pdf-job.js) so that all memory they use is
+// returned to the OS when the job ends. Only one job runs at a time; further
+// uploads wait in line, which keeps peak memory bounded.
+let jobQueue = Promise.resolve();
+
+function runPdfJob(pdfPath, onProgress, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      return resolve({ success: false, error: 'Client disconnected' });
+    }
+
+    const child = fork(PDF_JOB_SCRIPT, [], { stdio: 'inherit' });
+    let result = null;
+
+    const abort = () => child.kill('SIGKILL');
+    signal.addEventListener('abort', abort, { once: true });
+
+    child.on('message', (msg) => {
+      if (msg.kind === 'progress') onProgress(msg.data);
+      else if (msg.kind === 'result') result = msg.result;
+    });
+
+    child.on('exit', (code, sig) => {
+      signal.removeEventListener('abort', abort);
+      resolve(result ?? {
+        success: false,
+        error: signal.aborted
+          ? 'Client disconnected'
+          : `PDF job exited unexpectedly (code ${code}, signal ${sig})`,
       });
-  
-    const totalFiles = files.length;
-    let currentFile = 0;
-  
-    for (const image of files) {
-      currentFile++;
-      const imagePath = path.join(imagesFolder, image);
-      console.log('🔍 Processing image:', imagePath);
+    });
 
-      if (progressCallback) {
-        progressCallback({
-          stage: 'ocr',
-          current: currentFile,
-          total: totalFiles,
-          message: `Processing OCR on page ${currentFile} of ${totalFiles}`
-        });
-      }
-
-      const { data: { text } } = await worker.recognize(imagePath);
-      const _isSection = checkForNewSection(text);
-      if (_isSection) {
-        // Extract page number from filename (e.g., "page-1.png" -> 1)
-        const pageNumber = parseInt(image.match(/\d+/)[0], 10);
-        const section = {
-          page: pageNumber,
-          text: text,
-          documentType: detectDocumentType(text)
-        };
-        sections.push(section);
-        
-        // Emit section found event
-        if (progressCallback) {
-          progressCallback({
-            type: 'section_found',
-            section: section,
-            message: `Found section on page ${pageNumber}`
-          });
-        }
-      }
-    }
-  
-    await worker.terminate();
-    return sections;
-  }
-
-  // Function to detect document type based on OCR text
-  const detectDocumentType = (text) => {
-
-    // console.log("text: ", text)
-    const lowerText = text.toLowerCase();
-    
-    // Primary company detection - check for specific patterns first
-    // Check for company number pattern like 'C-9279472' (C- followed by any amount of numbers)
-    const companyNumberPattern = /C-\d+/i;
-    if (companyNumberPattern.test(text)) {
-      console.log("companyNumberPattern.test(text)")
-      return 'COMPANY';
-    }
-    
-    // Check for "Comp. Reg. No." or "Company Reg. No." pattern
-    const compRegPattern = /comp\.?\s*reg\.?\s*no\.?/i;
-    if (compRegPattern.test(text)) {
-      console.log("compRegPattern.test(text)")
-      return 'COMPANY';
-    }
-    
-    // Secondary company indicators (fallback)
-    const companyIndicators = ['CHICKENNNCNECNEJCNENC',
-      // 'company', 'ltd', 'limited', 'inc', 'corp', 'corporation', 'plc', 'llc',
-      // 'company number', 'registration number', 'reg no', 'company reg'
-    ];
-
-    if(companyIndicators.some(indicator => lowerText.includes(indicator))){
-      console.log("companyIndicators.some(indicator => lowerText.includes(indicator))")
-      return 'COMPANY';
-    }
-    
-    // Individual indicators
-    const individualIndicators = [
-      'name', 'spouse',
-      'date of birth', 'birthplace',
-      'father', 'mother',
-      'id card', 'passport', 'nee'
-    ];
-    
-    // Count matches for each category
-    const companyScore = companyIndicators.reduce((score, indicator) => {
-      return score + (lowerText.includes(indicator) ? 1 : 0);
-    }, 0);
-    
-    const individualScore = individualIndicators.reduce((score, indicator) => {
-      return score + (lowerText.includes(indicator) ? 1 : 0);
-    }, 0);
-
-    console.log("companyScore: ", companyScore)
-    console.log("individualScore: ", individualScore)
-    
-    // Return the category with the highest score, or default to company if no clear match
-    const maxScore = Math.max(companyScore, individualScore);
-    if (maxScore === 0) return 'COMPANY'; // Default to company
-    
-    if (individualScore > companyScore) return 'INDIVIDUAL';
-    return 'COMPANY'; // Default to company if scores are equal or company is higher
-  };
-  
-
-function checkForNewSection(text) {
-
-  // console.log(text)
-
-  const keywords = [
-    'Searches Unit',
-    'Searches Results',
-    'IDENTITY',
-    'Front Page',
-    // 'Archbishop Street',
-    // 'Achbishop Street',
-    // 'Valletta',
-    // 'bishop',
-    'IDENTITY Searches',
-    // 'Avchbishop Street',
-
-  ];
-
-  const keywords2 = [
-    'SEARCHES OF',
-    'LIABILITIES FROM',
-    'TRANSFERS FROM',
-    'TRANSFERS TO',
-    'LIABILITIES TO',
-    'FIDI FROM',
-    'FIDI TO',
-  ]
-
-  const lowerText = text.toLowerCase();
-  let foundCount = 0;
-  let foundCount2 = 0;
-  const foundKeywords = [];
-  const foundKeywords2 = [];
-
-  keywords.forEach(keyword => {
-    if (lowerText.includes(keyword.toLowerCase())) {
-      foundCount++;
-      foundKeywords.push(keyword);
-    }
+    child.send({ pdfPath });
   });
-
-  keywords2.forEach(keyword => {
-    if (lowerText.includes(keyword.toLowerCase())) {
-      foundCount2++;
-      foundKeywords2.push(keyword);
-    }
-  });
-
-  console.log("foundKeywords: ", foundKeywords)
-  console.log("foundKeywords2: ", foundKeywords2)
-
-  if (lowerText.includes('invoice')){ return false; }
-  // if (lowerText.includes('no remarks')){ return false; }
-
-  const isSection = foundCount >= 1 && foundCount2 >= 1;
-  if(isSection) { console.log(text) }
-  return isSection;
-};
-
-// Optimized PDF processing function using worker pool + header OCR
-async function processPdfPages(pdfPath, progressCallback) {
-  console.log(`🔄 Starting processing of: ${pdfPath}`);
-
-  const startTime = Date.now();
-  const data = new Uint8Array(fs.readFileSync(pdfPath));
-
-  const loadingTask = getDocument({
-    data,
-    ...PDFJS_LOADING_OPTIONS,
-  });
-
-  let pdfDocument = null;
-  let workerPool = [];
-
-  try {
-    pdfDocument = await loadingTask.promise;
-    const numPages = pdfDocument.numPages;
-    console.log(`📄 PDF has ${numPages} pages`);
-
-    const canvasFactory = pdfDocument.canvasFactory;
-    const sections = [];
-
-    const NUM_WORKERS = 8;
-    const HEADER_PERCENTAGE = 0.5;
-    let firstSectionTime = null;
-    let firstSectionPage = null;
-
-    console.log(`🔧 Creating worker pool (${NUM_WORKERS})...`);
-    workerPool = await Promise.all(
-      Array(NUM_WORKERS).fill(null).map(() => createWorker('eng'))
-    );
-    console.log(`✅ Worker pool ready`);
-
-    async function processPage(pageNum, worker) {
-      let page = null;
-      let headerCanvas = null;
-      let fullCanvas = null;
-
-      try {
-        const pageStartTime = Date.now();
-
-        if (progressCallback) {
-          progressCallback({
-            type: "progress",
-            stage: "converting",
-            current: pageNum,
-            total: numPages,
-            message: `Rendering header of page ${pageNum}/${numPages}`,
-          });
-        }
-
-        page = await pdfDocument.getPage(pageNum);
-
-        const fullViewport = page.getViewport({ scale: 1.5 });
-
-        let headerHeight = Math.floor(fullViewport.height * HEADER_PERCENTAGE);
-        if (headerHeight < 10) headerHeight = 10;
-
-        const headerViewport = page.getViewport({
-          scale: 1.5,
-          rotation: page.rotate,
-        });
-
-        headerViewport.height = headerHeight;
-        headerViewport.viewBox = [0, 0, fullViewport.width, headerHeight];
-
-        headerCanvas = canvasFactory.create(
-          headerViewport.width,
-          headerViewport.height
-        );
-
-        await page.render({
-          canvasContext: headerCanvas.context,
-          viewport: headerViewport,
-        }).promise;
-
-        const headerPNG = headerCanvas.canvas.toBuffer("image/jpeg", { quality: 0.8});
-        canvasFactory.destroy(headerCanvas);
-        headerCanvas = null;
-
-        if (!headerPNG || headerPNG.length < 50) {
-          throw new Error(`Header PNG invalid on page ${pageNum}`);
-        }
-
-        if (progressCallback) {
-          progressCallback({
-            type: "progress",
-            stage: "header_ocr",
-            current: pageNum,
-            total: numPages,
-            message: `OCR header on page ${pageNum}`,
-          });
-        }
-
-        const { data: { text: headerText } } = await worker.recognize(headerPNG);
-        const isSectionHeader = checkForNewSection(headerText);
-
-        if (!isSectionHeader) {
-          page.cleanup();
-          page = null;
-
-          if (progressCallback) {
-            progressCallback({
-              type: "progress",
-              stage: "skipped",
-              current: pageNum,
-              total: numPages,
-              message: `Header did not match — skipping full OCR`,
-            });
-          }
-
-          return null;
-        }
-
-        if (progressCallback) {
-          progressCallback({
-            type: "progress",
-            stage: "full_ocr",
-            current: pageNum,
-            total: numPages,
-            message: `Header matched — full OCR for page ${pageNum}`,
-          });
-        }
-
-        fullCanvas = canvasFactory.create(
-          fullViewport.width,
-          fullViewport.height
-        );
-
-        await page.render({
-          canvasContext: fullCanvas.context,
-          viewport: fullViewport,
-        }).promise;
-
-        const fullPNG = fullCanvas.canvas.toBuffer("image/jpeg", { quality: 0.8});
-        canvasFactory.destroy(fullCanvas);
-        fullCanvas = null;
-
-        if (!fullPNG || fullPNG.length < 100) {
-          throw new Error(`Full PNG invalid on page ${pageNum}`);
-        }
-
-        const { data: { text } } = await worker.recognize(fullPNG);
-
-        let suggestions = null;
-        try {
-          suggestions = await extractDatesFromImageBuffer(fullPNG, "image/jpeg");
-        } catch (suggestionError) {
-          console.error(`❌ Claude suggestions failed on page ${pageNum}:`, suggestionError);
-        }
-
-        page.cleanup();
-        page = null;
-
-        const documentType =
-          suggestions?.document_type === "COMPANY" || suggestions?.document_type === "INDIVIDUAL"
-            ? suggestions.document_type
-            : detectDocumentType(text);
-        const section = {
-          page: pageNum,
-          text,
-          documentType,
-          suggestions: suggestions || null,
-        };
-
-        sections.push(section);
-
-        if (!firstSectionTime || pageNum < firstSectionPage) {
-          firstSectionTime = Date.now();
-          firstSectionPage = pageNum;
-
-          if (progressCallback) {
-            progressCallback({
-              type: "first_section",
-              page: pageNum,
-              message: `First section detected`,
-              timeFromStart: ((firstSectionTime - startTime) / 1000).toFixed(2),
-            });
-          }
-        }
-
-        if (progressCallback) {
-          progressCallback({
-            type: "section_found",
-            section,
-            message: `Found section on page ${pageNum}`,
-          });
-        }
-
-        const duration = ((Date.now() - pageStartTime) / 1000).toFixed(2);
-        console.log(`  ✅ Page ${pageNum} processed in ${duration}s`);
-
-        return section;
-
-      } catch (pageError) {
-        console.error(`❌ Page ${pageNum} failed:`, pageError);
-
-        if (headerCanvas) { canvasFactory.destroy(headerCanvas); }
-        if (fullCanvas) { canvasFactory.destroy(fullCanvas); }
-        if (page) { page.cleanup(); }
-
-        if (progressCallback) {
-          progressCallback({
-            type: "page_error",
-            stage: "error",
-            page: pageNum,
-            message: pageError.message,
-          });
-        }
-
-        return null;
-      }
-    }
-
-    // Queue-based processing: workers continuously pick up next available page
-    let currentPage = 1;
-    const pagePromises = [];
-
-    for (let workerIndex = 0; workerIndex < NUM_WORKERS; workerIndex++) {
-      const worker = workerPool[workerIndex];
-
-      const workerPromise = (async () => {
-        while (currentPage <= numPages) {
-          const pageNum = currentPage++;
-          await processPage(pageNum, worker);
-        }
-      })();
-
-      pagePromises.push(workerPromise);
-    }
-
-    await Promise.all(pagePromises);
-
-    console.log(`✅ Processing complete! Found ${sections.length} sections`);
-
-    return {
-      success: true,
-      numPages,
-      sections,
-      firstSectionPage,
-      timeToFirstSection: firstSectionTime
-        ? ((firstSectionTime - startTime) / 1000).toFixed(2)
-        : null,
-    };
-  } catch (error) {
-    console.error("❌ Processing error:", error);
-
-    return {
-      success: false,
-      error: error.message,
-    };
-  } finally {
-    await Promise.all(workerPool.map((w) => w.terminate()));
-    if (pdfDocument) { pdfDocument.destroy(); }
-  }
 }
+
+function enqueuePdfJob(pdfPath, onProgress, signal) {
+  const job = jobQueue.then(() => runPdfJob(pdfPath, onProgress, signal));
+  jobQueue = job.catch(() => {});
+  return job;
+}
+
 // Upload endpoint with Server-Sent Events for progress
 app.post('/upload', upload.single('pdf'), async (req, res) => {
   if (!req.file) {
@@ -741,6 +141,12 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
     });
   };
 
+  // Kill the job if the client goes away before it finishes
+  const abortController = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) abortController.abort();
+  });
+
   try {
     // Send initial progress
     sendProgress({
@@ -750,11 +156,8 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
       progress: 0
     });
 
-    // Process PDF with combined page-by-page approach
-    const result = await processPdfPages(filePath, (progressData) => {
-      // Forward all progress events to client
-      sendProgress(progressData);
-    });
+    // Process PDF in a separate process; forward all progress events to client
+    const result = await enqueuePdfJob(filePath, sendProgress, abortController.signal);
 
     if (!result.success) {
       sendProgress({
